@@ -1,6 +1,6 @@
 {
   "name": "dsh-desktop-linux-updater",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "One-click update for self-built Linux dsh-desktop: checks the fork's GitHub releases, downloads the deb, swaps the app dir and restarts. 桌面端 Linux 自建版一键更新。",
   "type": "module",
   "main": "index.js",
@@ -26,7 +26,13 @@
     }
   },
   "license": "MIT",
-  "keywords": ["dsh", "dsh-plugin", "dsh-desktop", "linux", "updater"],
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "dsh-desktop",
+    "linux",
+    "updater"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/lin-1259/dsh-desktop-linux-updater.git"
