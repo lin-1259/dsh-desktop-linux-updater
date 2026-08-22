@@ -1,0 +1,13 @@
+# dsh-desktop-linux-updater bundle layer: applied automatically when the
+# package is installed (package.json declares dsh.bundle.patch).
+#
+# 默认配置即可用；owner/repo/upstream 可在 设置 → 插件 → 插件配置 里改：
+#  - owner/repo: 发布 linux-<tag> release 的仓库（默认 fork lin-1259/dsh-desktop）
+#  - upstream:   官方源码仓库（用于比对内置 harness 版本）
+- insert:
+    - id: dsh-desktop-linux-updater
+      name: dsh-desktop-linux-updater
+      config:
+        owner: lin-1259
+        repo: dsh-desktop
+        upstream: dataelement/dsh-desktop

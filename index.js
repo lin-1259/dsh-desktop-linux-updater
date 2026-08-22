@@ -1,0 +1,344 @@
+// dsh-desktop-linux-updater — server half.
+//
+// One-click update for the self-built Linux dsh-desktop:
+//   1. check()  — query the fork's GitHub releases for the newest linux-<tag>,
+//                 compare the bundled harness version against the upstream
+//                 source at that tag.
+//   2. update() — download the deb, extract it, write a detached swap script
+//                 (waits for the app to die, replaces the app dir, relaunches),
+//                 then pkill the running app.
+//
+// Routes (all under /_dsh/dsh-desktop-linux-updater/):
+//   GET  /status — current version, phase, download progress
+//   GET  /check  — fresh check (cached 5 min, ?force=1 to bypass); issues a
+//                  one-time CSRF token for the update route
+//   POST /update — performs the update (token + same-origin required)
+
+import z from '@deepseek-ai/schemastery'
+import { randomBytes } from 'node:crypto'
+import { execFile } from 'node:child_process'
+import { createWriteStream, existsSync, mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
+import { homedir, tmpdir } from 'node:os'
+import path from 'node:path'
+import { promisify } from 'node:util'
+
+const execFileAsync = promisify(execFile)
+const CHECK_CACHE_MS = 5 * 60 * 1000
+
+export const name = 'dsh-desktop-linux-updater'
+
+export const Config = z.object({
+  // 发布 linux-<tag> release 的仓库
+  owner: z.string().default('lin-1259'),
+  repo: z.string().default('dsh-desktop'),
+  // 官方源码仓库（用于按 release tag 比对内置 harness 版本）
+  upstream: z.string().default('dataelement/dsh-desktop'),
+  // 应用安装目录；留空自动检测（从运行中的 harness 推导或常见路径）
+  appDir: z.string().default(''),
+  // 更新完成后自动杀掉旧进程并重启（false = 只替换文件，手动重启）
+  autoRestart: z.boolean().default(true),
+})
+
+function detectAppDir() {
+  // 运行中的 harness: <appDir>/resources/app/node_modules/node/bin/node
+  let dir = path.dirname(process.execPath)
+  for (let i = 0; i < 6; i += 1) {
+    dir = path.dirname(dir)
+    if (existsSync(path.join(dir, 'resources', 'app', 'package.json'))) return dir
+  }
+  for (const p of [path.join(homedir(), '.local', 'share', 'dsh-desktop'), '/opt/DSH Desktop']) {
+    if (existsSync(path.join(p, 'resources', 'app', 'package.json'))) return p
+  }
+  return ''
+}
+
+function appPackageJson(appDir) {
+  const p = path.join(appDir, 'resources', 'app', 'package.json')
+  try {
+    return JSON.parse(readFileSync(p, 'utf8'))
+  } catch {
+    return null
+  }
+}
+
+function currentVersion(appDir) {
+  const pkg = appPackageJson(appDir)
+  if (!pkg) return 'unknown'
+  return pkg.dependencies?.['@deepseek-ai/dsh'] || pkg.version || 'unknown'
+}
+
+async function fetchJson(url, timeoutMs = 20000) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    const res = await fetch(url, { signal: controller.signal })
+    if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`)
+    return await res.json()
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+// 最新 linux-* release 的 deb 资产信息
+async function latestRelease(config) {
+  const url = `https://api.github.com/repos/${config.owner}/${config.repo}/releases?per_page=20`
+  const releases = await fetchJson(url)
+  if (!Array.isArray(releases)) throw new Error('GitHub releases 响应格式异常')
+  const linux = releases.filter((r) => r.tag_name?.startsWith('linux-') && !r.draft)
+  if (linux.length === 0) return null
+  const latest = linux[0]
+  const deb = (latest.assets || []).find((a) => a.name?.endsWith('.deb'))
+  if (!deb) return null
+  return {
+    tag: latest.tag_name,
+    upstreamTag: latest.tag_name.slice('linux-'.length),
+    url: deb.browser_download_url,
+    name: deb.name,
+    size: deb.size,
+    publishedAt: latest.published_at,
+  }
+}
+
+// 某 release tag 对应的官方源码里内置的 dsh harness 版本
+async function versionForTag(config, upstreamTag) {
+  const url = `https://raw.githubusercontent.com/${config.upstream}/${upstreamTag}/package.json`
+  const pkg = await fetchJson(url)
+  return pkg.dependencies?.['@deepseek-ai/dsh'] || pkg.version || upstreamTag
+}
+
+export function apply(ctx, config = {}) {
+  const state = {
+    appDir: config.appDir || detectAppDir(),
+    current: currentVersion(config.appDir || detectAppDir()),
+    phase: 'idle', // idle | checking | downloading | extracting | restarting | done | error
+    phaseDetail: '',
+    downloadedBytes: 0,
+    totalBytes: 0,
+    lastCheck: null,
+    lastError: null,
+  }
+  let checkCache = { at: 0, result: null }
+  let updateToken = ''
+  let updateInFlight = null
+
+  const refreshState = () => {
+    state.appDir = config.appDir || detectAppDir()
+    state.current = currentVersion(state.appDir)
+  }
+
+  const check = async (force = false) => {
+    if (!force && checkCache.result && Date.now() - checkCache.at < CHECK_CACHE_MS) {
+      return checkCache.result
+    }
+    state.phase = 'checking'
+    state.phaseDetail = '查询 GitHub releases'
+    try {
+      const release = await latestRelease(config)
+      if (!release) {
+        const result = { ok: true, updateAvailable: false, current: state.current, error: '仓库里没有 linux-* release' }
+        checkCache = { at: Date.now(), result }
+        state.phase = 'idle'
+        return result
+      }
+      const latest = await versionForTag(config, release.upstreamTag)
+      const updateAvailable = latest !== state.current
+      // 每次 check 签发一次性更新令牌（变更路由的 CSRF 防线之一）
+      updateToken = randomBytes(24).toString('base64url')
+      const result = {
+        ok: true,
+        updateAvailable,
+        current: state.current,
+        latest,
+        releaseTag: release.tag,
+        upstreamTag: release.upstreamTag,
+        releaseUrl: release.url,
+        assetName: release.name,
+        assetSize: release.size,
+        publishedAt: release.publishedAt,
+        token: updateToken,
+      }
+      checkCache = { at: Date.now(), result }
+      state.lastCheck = new Date().toISOString()
+      state.phase = 'idle'
+      return result
+    } catch (error) {
+      state.phase = 'idle'
+      state.lastError = String(error?.message || error)
+      return { ok: false, error: state.lastError }
+    }
+  }
+
+  const streamDownload = async (url, destPath) => {
+    const res = await fetch(url)
+    if (!res.ok || !res.body) throw new Error(`下载失败 HTTP ${res.status}`)
+    const reader = res.body.getReader()
+    const file = createWriteStream(destPath)
+    let received = 0
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      file.write(value)
+      received += value.length
+      state.downloadedBytes = received
+    }
+    await new Promise((resolve, reject) => {
+      file.end(resolve)
+      file.on('error', reject)
+    })
+  }
+
+  const performUpdate = async () => {
+    if (updateInFlight) return updateInFlight
+    updateInFlight = (async () => {
+      refreshState()
+      const tmpDir = mkdtempSync(path.join(tmpdir(), 'dsh-upd-'))
+      try {
+        const release = await latestRelease(config)
+        if (!release) throw new Error('仓库里没有 linux-* release')
+        // 更新前再校验一次目标版本确实不同
+        const latest = await versionForTag(config, release.upstreamTag)
+        if (latest === state.current) {
+          return { ok: false, error: `已是最新（${state.current}）` }
+        }
+
+        // 1) 下载 deb
+        state.phase = 'downloading'
+        state.phaseDetail = `下载 ${release.name} (${(release.size / 1e6).toFixed(0)} MB)`
+        state.downloadedBytes = 0
+        state.totalBytes = release.size
+        const debPath = path.join(tmpDir, release.name)
+        await streamDownload(release.url, debPath)
+
+        // 2) 解包
+        state.phase = 'extracting'
+        state.phaseDetail = '解包 deb'
+        const extractDir = path.join(tmpDir, 'root')
+        await execFileAsync('dpkg-deb', ['-x', debPath, extractDir])
+        const newApp = path.join(extractDir, 'opt', 'DSH Desktop')
+        if (!existsSync(path.join(newApp, 'resources', 'app', 'package.json'))) {
+          throw new Error('deb 里没找到 /opt/DSH Desktop，包结构异常')
+        }
+
+        // 3) 写交换脚本（路径内嵌进脚本内容，cmdline 干净，pkill 不会误杀）
+        state.phase = 'restarting'
+        state.phaseDetail = '替换应用目录并重启'
+        const script = path.join(tmpDir, 'swap.sh')
+        writeFileSync(
+          script,
+          [
+            '#!/bin/sh',
+            `sleep 3`,
+            `APP='${state.appDir}'`,
+            `NEW='${newApp}'`,
+            'if [ -d "$APP" ]; then mv "$APP" "$APP.bak"; fi',
+            'cp -a "$NEW" "$APP"',
+            'rm -rf "$APP.bak"',
+            'if command -v gtk-launch >/dev/null 2>&1; then gtk-launch dsh-desktop >/dev/null 2>&1; else setsid "$APP/dsh-desktop" >/dev/null 2>&1 & fi',
+            '',
+          ].join('\n'),
+          { mode: 0o755 },
+        )
+
+        // 4) 分离执行脚本，然后杀掉当前 app（harness 随主进程退出）
+        const { spawn } = await import('node:child_process')
+        const child = spawn('setsid', [script], { detached: true, stdio: 'ignore' })
+        child.unref()
+        if (config.autoRestart !== false) {
+          try {
+            await execFileAsync('pkill', ['-f', `^${state.appDir}/dsh-desktop`])
+            await execFileAsync('pkill', ['-f', `^${state.appDir}/resources`])
+          } catch {
+            /* 进程可能已自行退出 */
+          }
+        }
+        state.phase = 'done'
+        state.phaseDetail = `已替换，应用正在重启（新版本 ${latest}）`
+        return { ok: true, restarting: config.autoRestart !== false, version: latest }
+      } catch (error) {
+        state.phase = 'error'
+        state.phaseDetail = String(error?.message || error)
+        rmSync(tmpDir, { recursive: true, force: true })
+        return { ok: false, error: state.phaseDetail }
+      }
+    })()
+    const result = await updateInFlight
+    updateInFlight = null
+    return result
+  }
+
+  ctx.inject(['webServer'], (webCtx) => {
+    webCtx.effect(() => {
+      const routes = [
+        {
+          kind: 'exact',
+          path: '/_dsh/dsh-desktop-linux-updater/status',
+          handler: async (req, res) => {
+            if (req.method !== 'GET') {
+              res.setHeader('Allow', 'GET')
+              res.writeHead(405)
+              res.end()
+              return
+            }
+            refreshState()
+            res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+            res.end(JSON.stringify({ ok: true, ...state, lastError: state.lastError }))
+          },
+        },
+        {
+          kind: 'exact',
+          path: '/_dsh/dsh-desktop-linux-updater/check',
+          handler: async (req, res) => {
+            if (req.method !== 'GET') {
+              res.setHeader('Allow', 'GET')
+              res.writeHead(405)
+              res.end()
+              return
+            }
+            const force = /(?:[?&])force=1(?:&|$)/.test(String(req.url ?? ''))
+            const result = await check(force)
+            res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+            res.end(JSON.stringify(result))
+          },
+        },
+        {
+          kind: 'exact',
+          path: '/_dsh/dsh-desktop-linux-updater/update',
+          handler: async (req, res) => {
+            if (req.method !== 'POST') {
+              res.setHeader('Allow', 'POST')
+              res.writeHead(405)
+              res.end()
+              return
+            }
+            const fetchSite = String(req.headers?.['sec-fetch-site'] ?? '')
+            if (fetchSite && fetchSite !== 'same-origin' && fetchSite !== 'none') {
+              res.writeHead(403, { 'content-type': 'application/json' })
+              res.end(JSON.stringify({ ok: false, error: 'cross-origin update request rejected' }))
+              return
+            }
+            const token = String(req.headers?.['x-dsh-desktop-updater-token'] ?? '')
+            if (!token || token !== updateToken) {
+              res.writeHead(403, { 'content-type': 'application/json' })
+              res.end(JSON.stringify({ ok: false, error: 'invalid update token（请先检查更新）' }))
+              return
+            }
+            try {
+              const result = await performUpdate()
+              updateToken = randomBytes(24).toString('base64url')
+              res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+              res.end(JSON.stringify(result))
+            } catch (error) {
+              res.writeHead(500, { 'content-type': 'application/json' })
+              res.end(JSON.stringify({ ok: false, error: String(error?.message || error) }))
+            }
+          },
+        },
+      ]
+      for (const route of routes) {
+        webCtx.webServer.register(route)
+      }
+    }, 'dsh-desktop-linux-updater routes')
+  })
+
+  return { check, state }
+}
