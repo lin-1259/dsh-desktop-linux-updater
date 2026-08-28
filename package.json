@@ -1,9 +1,12 @@
 {
   "name": "dsh-desktop-linux-updater",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "One-click update for self-built Linux dsh-desktop: checks the fork's GitHub releases, downloads the deb, swaps the app dir and restarts. 桌面端 Linux 自建版一键更新。",
   "type": "module",
   "main": "index.js",
+  "scripts": {
+    "test": "node --test"
+  },
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",
