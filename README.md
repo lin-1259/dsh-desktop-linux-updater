@@ -50,6 +50,16 @@ npx -y @deepseek-ai/dsh plugin --profile web add github:lin-1259/dsh-desktop-lin
   webServer 路由 + settings 卡片两个稳定接口）。
 - 仅 Linux（更新流程依赖 `dpkg-deb`、`pkill`、`setsid`）。
 
+## 故障排查
+
+| 现象 | 原因 / 处理 |
+|---|---|
+| 「检查更新」显示已是最新，但 GitHub 上明明有新版 | 插件对比的是**内置 harness 版本**（`@deepseek-ai/dsh`），不是 release 号——外壳小版本（如 v0.6.2→v0.6.3）引擎不变时不提示，属预期 |
+| 下载很慢 / 超时 | GitHub 直连受限时可给 dsh 进程配代理（`HTTPS_PROXY`），或换网络 |
+| 「磁盘空间不足」 | 更新需要约 3 倍 deb 体积（下载 + 解包）的余量，清理分区后再试 |
+| 更新失败后应用没起来 | 交换脚本会**自动回滚**备份目录；仍异常时手动检查 `~/.local/share/dsh-desktop` 是否有 `.bak` 目录，删掉坏的、把备份改回来即可 |
+| 想绕过「已是最新」强制换外壳版本 | 插件配置把 `upstream` 换成目标 tag 对应的仓库版本线，或等引擎版本变化 |
+
 ## License
 
 MIT
