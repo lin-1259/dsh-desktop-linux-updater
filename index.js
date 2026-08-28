@@ -18,9 +18,11 @@ import z from '@deepseek-ai/schemastery'
 import { randomBytes } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { createWriteStream, existsSync, mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
+import { statfs } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import path from 'node:path'
 import { promisify } from 'node:util'
+import { versionDiffers } from './lib/version.js'
 
 const execFileAsync = promisify(execFile)
 const CHECK_CACHE_MS = 5 * 60 * 1000
@@ -141,7 +143,7 @@ export function apply(ctx, config = {}) {
         return result
       }
       const latest = await versionForTag(config, release.upstreamTag)
-      const updateAvailable = latest !== state.current
+      const updateAvailable = versionDiffers(latest, state.current)
       // 每次 check 签发一次性更新令牌（变更路由的 CSRF 防线之一）
       updateToken = randomBytes(24).toString('base64url')
       const result = {
@@ -197,8 +199,19 @@ export function apply(ctx, config = {}) {
         if (!release) throw new Error('仓库里没有 linux-* release')
         // 更新前再校验一次目标版本确实不同
         const latest = await versionForTag(config, release.upstreamTag)
-        if (latest === state.current) {
+        if (!versionDiffers(latest, state.current)) {
           return { ok: false, error: `已是最新（${state.current}）` }
+        }
+
+        // 0) 磁盘空间预检：下载 + 解包需要约 3 倍 deb 体积的余量
+        const { bavail, bsize } = await statfs(state.appDir || '/')
+        const freeBytes = bavail * bsize
+        const needBytes = release.size * 3
+        if (freeBytes < needBytes) {
+          return {
+            ok: false,
+            error: `磁盘空间不足：需要约 ${(needBytes / 1e9).toFixed(1)} GB，${state.appDir || '/'} 所在分区仅剩 ${(freeBytes / 1e9).toFixed(1)} GB`,
+          }
         }
 
         // 1) 下载 deb
