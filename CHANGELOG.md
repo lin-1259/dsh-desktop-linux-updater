@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.1.3] — 2026-09-05
+
+- **feat: 更新判定改为桌面端 release tag**（`linux-v0.7.1` → `linux-v0.7.2` 也提示更新）。
+  之前的基准是内置 harness 版本 spec，官方 v0.7.x 内部 harness 声明不变导致外壳小版本更新被漏报。
+  现在：任何 `linux-*` tag 变化都提示；harness 版本降为信息展示（`currentHarness`/`latestHarness`），
+  因为 harness 升级必然随官方新 release 一起发布。
+- feat: 安装的 release tag 持久化到 `~/.config/dsh-desktop/updater-state.json`（更新成功后写入；
+  app 目录会被整体替换，状态不能放里面）。首次使用无记录时视为可更新（宁多勿漏）。
+- feat: `raw.githubusercontent` 不可达时不再阻断更新判定（harness 信息显示 null 而已）。
+- ui: 设置卡片新增「内置引擎」行，展示当前/最新 harness 版本。
+
 ## [0.1.2] — 2026-08-27
 
 - feat: 更新前磁盘空间预检（`statfs` 检查应用目录所在分区，空间不足直接中止，不再白下 150MB）
