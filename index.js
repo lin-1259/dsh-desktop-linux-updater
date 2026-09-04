@@ -138,6 +138,17 @@ async function versionForTag(config, upstreamTag) {
   return pkg.dependencies?.['@deepseek-ai/dsh'] || pkg.version || upstreamTag
 }
 
+// 官方 release 的更新说明（body）。fork 的 body 只是构建说明，没有更新内容，
+// 所以 notes 取官方（官方 v0.7.2 起为中文）。拿不到 → null，不影响更新判定。
+async function fetchUpstreamNotes(config, upstreamTag) {
+  const url = `https://api.github.com/repos/${config.upstream}/releases/tags/${upstreamTag}`
+  const release = await fetchJson(url)
+  const body = String(release?.body ?? '').trim()
+  if (!body) return null
+  // 截断：release notes 可能很长，卡片只展示前 1200 字符 + 省略号
+  return body.length > 1200 ? `${body.slice(0, 1200)}\n…（完整更新说明见官方 Release 页面）` : body
+}
+
 export function apply(ctx, config = {}) {
   const state = {
     appDir: config.appDir || detectAppDir(),
@@ -183,6 +194,12 @@ export function apply(ctx, config = {}) {
       } catch {
         latestHarness = null // raw.githubusercontent 不可达时不影响更新判定
       }
+      let notes = null
+      try {
+        notes = await fetchUpstreamNotes(config, release.upstreamTag)
+      } catch {
+        notes = null // 官方 notes 拿不到时不影响更新判定
+      }
       // 每次 check 签发一次性更新令牌（变更路由的 CSRF 防线之一）
       updateToken = randomBytes(24).toString('base64url')
       const result = {
@@ -192,6 +209,7 @@ export function apply(ctx, config = {}) {
         latest: release.tag,
         currentHarness: state.currentHarness,
         latestHarness,
+        notes,
         releaseTag: release.tag,
         upstreamTag: release.upstreamTag,
         releaseUrl: release.url,

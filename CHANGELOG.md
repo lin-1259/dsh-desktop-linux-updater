@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.1.4] — 2026-09-05
+
+- feat: 检查更新时抓取**官方 release notes**（`fetchUpstreamNotes`），设置卡片新增「更新内容」区展示
+  （限高 180px 滚动、保留换行；官方 v0.7.2 起 notes 为中文）。拿不到 notes 不影响更新判定。
+- ui: 更新内容超过 1200 字符时截断并提示查看官方 Release 页面。
+
 ## [0.1.3] — 2026-09-05
 
 - **feat: 更新判定改为桌面端 release tag**（`linux-v0.7.1` → `linux-v0.7.2` 也提示更新）。

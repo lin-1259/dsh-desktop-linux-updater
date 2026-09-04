@@ -21,6 +21,7 @@ window.__ModuleLoader__.load({
       current: '当前版本',
       latest: '最新版本',
       harness: '内置引擎',
+      notes: '更新内容',
       check: '检查更新',
       checking: '检查中…',
       updateAvailable: '发现新版本',
@@ -47,6 +48,7 @@ window.__ModuleLoader__.load({
       current: 'Current',
       latest: 'Latest',
       harness: 'Bundled engine',
+      notes: 'What\'s new',
       check: 'Check for updates',
       checking: 'Checking…',
       updateAvailable: 'Update available',
@@ -146,6 +148,15 @@ window.__ModuleLoader__.load({
         },
         error: { color: '#ef4444', fontSize: '12px' },
         progress: { fontSize: '12px', opacity: 0.75 },
+        notesBox: {
+          border: '1px solid var(--border, #333)', borderRadius: '8px',
+          padding: '8px 10px', background: 'rgba(127,127,127,.06)', maxWidth: '100%',
+        },
+        notesBody: {
+          fontSize: '12px', lineHeight: '1.55', whiteSpace: 'pre-wrap',
+          wordBreak: 'break-word', maxHeight: '180px', overflowY: 'auto',
+          opacity: 0.85,
+        },
       }
       const downloading = status.phase === 'downloading' || status.phase === 'extracting' || status.phase === 'restarting'
       const phaseText = (status.phaseLabel && status.phase) || status.phaseDetail || t('phaseLabel')[status.phase] || status.phase
@@ -170,6 +181,12 @@ window.__ModuleLoader__.load({
           h('span', { style: style.label }, t('latest')),
           h('span', { style: style.value }, check ? check.latest || t('unknown') : '—'),
         ),
+        check && check.notes
+          ? h('div', { style: style.notesBox },
+              h('div', { style: { ...style.label, marginBottom: '4px' } }, t('notes')),
+              h('div', { style: style.notesBody }, check.notes),
+            )
+          : null,
         status.appDir
           ? h('div', { style: style.row },
               h('span', { style: { ...style.label, fontSize: '11px' } }, status.appDir),
